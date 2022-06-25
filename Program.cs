@@ -84,6 +84,7 @@ namespace Secret_Reboot_Server_Console
         public string IP { get; set; } = "DEFAULT";
         public string Token { get; set; } = "DEFAULT";
         public string ID { get; set; } = "DEFAULT";
+        public string HWID { get; set; } = "DEFAULT";
 
         public ServerPunishmentHistory ServerPunishmentHistory { get; set; } = new ServerPunishmentHistory();
     }
@@ -137,7 +138,7 @@ namespace Secret_Reboot_Server_Console
 
         public static string Ip { get; set; }
 
-        public static void Main(string[] args)
+        public static async void Main(string[] args)
         {
             LibProperties.Logger = new SystemConsoleLogger();
             LibProperties.Log_AddStackTraceToThrowHelper = true;
@@ -174,6 +175,8 @@ namespace Secret_Reboot_Server_Console
 
             NiveraLog.Info($"Server is listening on IP {Ip} and all ports (UDP)");
             NiveraLog.Info($"Finished loading.");
+
+            await System.Threading.Tasks.Task.Delay(-1);
         }
     }
 
