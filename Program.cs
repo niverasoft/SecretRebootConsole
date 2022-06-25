@@ -102,6 +102,8 @@ namespace Secret_Reboot_Server_Console
             {
                 Save();
 
+                NiveraLog.Info("Database loaded.");
+
                 return;
             }
 
@@ -127,6 +129,8 @@ namespace Secret_Reboot_Server_Console
             file.SerializeFile(Players, "players");
             file.SerializeFile(Servers, "servers");
             file.WriteTo("./database");
+
+            NiveraLog.Info("Saved database");
         }
     }
 
@@ -138,7 +142,7 @@ namespace Secret_Reboot_Server_Console
 
         public static string Ip { get; set; }
 
-        public static async void Main(string[] args)
+        public static async System.Threading.Tasks.Task Main(string[] args)
         {
             LibProperties.Logger = new SystemConsoleLogger();
             LibProperties.Log_AddStackTraceToThrowHelper = true;
@@ -151,6 +155,8 @@ namespace Secret_Reboot_Server_Console
             LibProperties.Load();
 
             NiveraLog.Info("Hello! Loading Secret Reboot ..");
+
+            Database.Load();
 
             Ip = IpUtils.RetrieveCurrentIp();
 
