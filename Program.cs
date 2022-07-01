@@ -162,9 +162,9 @@ namespace Secret_Reboot_Server_Console
 
             Server = new NetworkServer();
 
-            Server.OnConnectionEstablished += x =>
+            Server.OnConnectionEstablished += (x, e) =>
             {
-                Players[x.Id] = new NetworkPlayer(new NetworkConnection(Server.netManager, Server.eventBasedNetListener));
+                Players[x.Id] = new NetworkPlayer(e);
 
                 NiveraLog.Info($"CLIENT {x.Id} CONNECTED FROM {x.EndPoint}");
             };
@@ -190,36 +190,18 @@ namespace Secret_Reboot_Server_Console
     {
         private NetworkPacket packet = new NetworkPacket();
 
-        public static PacketBuilder Default => new PacketBuilder().WithHeader("CONSOLE").WithIp(Program.Ip);
+        public static PacketBuilder Default => new PacketBuilder().WithHeader("Sender", "Server").WithIp(Program.Ip);
 
-        public PacketBuilder WithChannel(byte channel)
+        public PacketBuilder WithHeader(string name, string header)
         {
-            packet.Channel = channel;
-
-            return this;
-        }
-
-        public PacketBuilder WithHeader(string header)
-        {
-            packet.Header = header;
+            packet.Headers[name] = header;
 
             return this;
         }
 
         public PacketBuilder WithIp(string ip)
         {
-            packet.SourceIp = ip;
-
-            return this;
-        }
-
-        public PacketBuilder AddArg(object arg)
-        {
-            var args = new List<string>(packet.Args);
-
-            args.Add(arg.ToString());
-
-            packet.Args = args.ToArray();
+            packet.Headers["SenderAddress"] = ip;
 
             return this;
         }
@@ -249,9 +231,9 @@ namespace Secret_Reboot_Server_Console
 
             networkConnection.OnDataReceived += x =>
             {
-                NiveraLog.Info($"CLIENT {Connection.netPeer.Id} FROM {x.SourceIp} SENT {x.Header} PACKET ON CHANNEL {x.Channel} ({x.Content.Length}/{x.Args.Length})");
+                NiveraLog.Info($"CLIENT {Connection.netPeer.Id} FROM {x.Headers["SenderAddress"]} SENT {x.Headers["Sender"]} PACKET ({x.Content.Length}/{x.Headers.Values.Count})");
 
-                if (x.Header == "SERVER")
+                if (x.Headers["Sender"] == "Server")
                     ProcessServer(x);
                 else
                     ProcessClient(x);
@@ -262,13 +244,10 @@ namespace Secret_Reboot_Server_Console
 
         public void ProcessServer(NetworkPacket networkPacket)
         {
-            switch (networkPacket.Channel)
+            switch (networkPacket.Headers["RequestType"])
             {
-                // Hello
-                case 0:
+                case "None":
                     {
-                        Connection.Send(PacketBuilder.Default.AddContent("Ok").Complete());
-
                         break;
                     }
             }
@@ -276,7 +255,7 @@ namespace Secret_Reboot_Server_Console
 
         public void ProcessClient(NetworkPacket networkPacket)
         {
-            switch (networkPacket.Channel)
+            switch (networkPacket.Headers["RequestType"])
             {
 
             }
@@ -287,10 +266,5 @@ namespace Secret_Reboot_Server_Console
             Connection.Disconnect();
             Connection = null;
         }
-    }
-
-    public static class KeyGen
-    {
-
     }
 }
