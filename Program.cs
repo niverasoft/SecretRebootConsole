@@ -345,7 +345,7 @@ namespace Secret_Reboot_Server_Console
                     return;
                 }
 
-                if (x.Headers["Sender"] == "Server")
+                if (x.Headers["Sender"] == "ServerClient")
                     ProcessServer(x);
                 else
                     ProcessClient(x);
@@ -438,7 +438,7 @@ namespace Secret_Reboot_Server_Console
                             return;
                         }
 
-                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "PlayerInfo").WithArg("Result", "Success").WithArg("PlayerData", JsonConvert.SerializeObject(savedPlayerData)).Complete());
+                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "PlayerInfo").WithArg("Result", "Ok").WithArg("PlayerData", JsonConvert.SerializeObject(savedPlayerData)).Complete());
 
                         break;
                     }
@@ -506,7 +506,7 @@ namespace Secret_Reboot_Server_Console
                             return;
                         }
 
-                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadServerList").WithArg("ServerListData", JsonConvert.SerializeObject(ServerList.VerifiedServers)).Complete());
+                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadServerList").WithArg("Result", "Ok").WithArg("ServerListData", JsonConvert.SerializeObject(ServerList.VerifiedServers)).Complete());
 
                         break;
                     }
