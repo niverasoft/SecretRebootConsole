@@ -206,16 +206,7 @@ namespace SecretRebootConsole
 
         public static string CreateConnectionKey()
         {
-            byte[] buffer = new byte[] { };
-
-            Random random = new Random();
-
-            while (buffer.Length != 10)
-            {
-                random.NextBytes(buffer);
-            }
-
-            return Encoding.UTF32.GetString(buffer);
+            return RandomGen.RandomBytesString(50, 50);
         }
 
         public static void Exit()
@@ -256,7 +247,7 @@ namespace SecretRebootConsole
 
             NiveraLog.Info($"Generating encryption key ..");
 
-            EncryptionKey = Nivera.Encryption.EncryptionKey.GenerateKey(512);
+            EncryptionKey = Nivera.Encryption.EncryptionKey.GenerateKey(256);
 
             NiveraLog.Info($"Encryption key generated.");
             NiveraLog.Info($"Generating connection key ..");
@@ -375,6 +366,24 @@ namespace SecretRebootConsole
                 Players.Remove(x.Id);
             };
 
+            Console.CancelKeyPress += (x, e) =>
+            {
+                Exit();
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (x, e) =>
+            {
+                NiveraLog.Error(e.ExceptionObject);
+
+                if (e.IsTerminating)
+                    Exit();
+            };
+
+            AppDomain.CurrentDomain.ProcessExit += (x, e) =>
+            {
+                Exit();
+            };
+
             NetManager.Start();
 
             NiveraLog.Info($"Server is listening on IP {Ip} and all ports (UDP)");
@@ -472,7 +481,6 @@ namespace SecretRebootConsole
     public class NetworkPlayer
     {
         public NetPeer Peer { get; }
-
         public string IP { get; set; }
         public int Port { get; set; }
         public bool IsServer { get; set; }    
@@ -567,30 +575,30 @@ namespace SecretRebootConsole
 
         public string GenerateRandomIdentifier()
         {
-            byte[] buffer = new byte[] { };
+            List<byte> bytes = new List<byte>();
 
             Random random = new Random();
 
-            while (buffer.Length != 20)
+            while (bytes.Count != 30)
             {
-                random.NextBytes(buffer);
+                bytes.Add(Convert.ToByte(random.Next(0, 255)));
             }
 
-            return Encoding.UTF32.GetString(buffer);
+            return Encoding.UTF32.GetString(bytes.ToArray());
         }
 
         public string GenerateRandomToken()
         {
-            byte[] buffer = new byte[] { };
+            List<byte> bytes = new List<byte>();
 
             Random random = new Random();
 
-            while (buffer.Length != 30)
+            while (bytes.Count != 50)
             {
-                random.NextBytes(buffer);
+                bytes.Add(Convert.ToByte(random.Next(0, 255)));
             }
 
-            return Convert.ToBase64String(buffer);
+            return Convert.ToBase64String(bytes.ToArray());
         }
         
         public void ProcessServer(Dictionary<string, string> packet)

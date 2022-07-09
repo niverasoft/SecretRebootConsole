@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "SecretRebootConsole": {
+      "commandName": "Project",
+      "commandLineArgs": "C:\\Users\\CentralCity\\Desktop\\Projekty\\SecretReboot\\CDN"
+    }
+  }
+}
