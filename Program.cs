@@ -218,6 +218,14 @@ namespace SecretRebootConsole
             return Encoding.UTF32.GetString(buffer);
         }
 
+        public static void Exit()
+        {
+            Database.Save();
+            ServerList.NoServers();
+
+            File.Delete($"{CdnDirectory}/connectionkey.txt");
+        }
+
         public static async Task Main(string[] args)
         {
             LibProperties.Logger = new SystemConsoleLogger();
@@ -237,6 +245,7 @@ namespace SecretRebootConsole
             NiveraLog.Info($"CDN directory set to {CdnDirectory}");
 
             Database.Load();
+            ServerList.Start();
 
             Ip = IpUtils.RetrieveCurrentIp();
 
@@ -250,7 +259,6 @@ namespace SecretRebootConsole
             EncryptionKey = Nivera.Encryption.EncryptionKey.GenerateKey(512);
 
             NiveraLog.Info($"Encryption key generated.");
-
             NiveraLog.Info($"Generating connection key ..");
 
             ConnectionKey = CreateConnectionKey();
@@ -258,7 +266,6 @@ namespace SecretRebootConsole
             File.WriteAllText($"{CdnDirectory}/connectionkey.txt", ConnectionKey);
 
             NiveraLog.Info($"Connection key generated: {ConnectionKey}");
-
             NiveraLog.Info("Finished building network");
 
             NetManager.AllowPeerAddressChange = false;
@@ -273,9 +280,8 @@ namespace SecretRebootConsole
             NetManager.ReconnectDelay = 1000;
             NetManager.ReuseAddress = true;
             NetManager.UnconnectedMessagesEnabled = false;
-            NetManager.Start();
 
-            NiveraLog.Info("Server Manager started, registering event listeners ..");
+            NiveraLog.Info("Server Manager configured, registering event listeners ..");
 
             EventBasedNetListener.ConnectionRequestEvent += x =>
             {
@@ -369,10 +375,26 @@ namespace SecretRebootConsole
                 Players.Remove(x.Id);
             };
 
+            NetManager.Start();
+
             NiveraLog.Info($"Server is listening on IP {Ip} and all ports (UDP)");
             NiveraLog.Info($"Finished loading.");
 
+            await PollEvents();
+
             await Task.Delay(-1);
+        }
+
+        public static async Task PollEvents()
+        {
+            NiveraLog.Info("NetManager EventPolling Started");
+
+            while (true)
+            {
+                await Task.Delay(20);
+
+                NetManager.PollEvents();
+            }
         }
     }
 
@@ -388,7 +410,23 @@ namespace SecretRebootConsole
             public int MaxPlayers { get; set; }
         }
 
+        public class NoServersResponse
+        {
+            [JsonProperty("response")]
+            public string Response { get; set; } = "No servers available.";
+        }
+
         public static Dictionary<string, ServerListServerData> VerifiedServers = new Dictionary<string, ServerListServerData>();
+
+        public static void NoServers()
+        {
+            File.WriteAllText($"{Program.CdnDirectory}/verifiedserverlist.json", JsonConvert.SerializeObject(new NoServersResponse(), Formatting.Indented));
+        }
+
+        public static void Start()
+        {
+            NoServers();
+        }
 
         public static void UpdateDataOnList(string serverToken, Dictionary<string, string> data)
         {
@@ -598,7 +636,7 @@ namespace SecretRebootConsole
 
                         if (savedPlayerData == null)
                         {
-                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Player"));
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Player").AddData("RequestName", "PlayerInfo"));
 
                             return;
                         }
@@ -614,14 +652,14 @@ namespace SecretRebootConsole
 
                         if (savedPlayerData == null)
                         {
-                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Player"));
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Player").AddData("RequestName", "AuthCommand"));
 
                             return;
                         }
 
                         if (!savedPlayerData.Token.Contains("authCmds"))
                         {
-                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unauthorized_Player"));
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unauthorized_Player").AddData("RequestName", "AuthCommand"));
 
                             return;
                         }
@@ -662,7 +700,7 @@ namespace SecretRebootConsole
                             Database.Save();
                         }
 
-                        Send(CreatePacket().AddData("Result", "True").AddData("ServerToken", savedServerData.Token));
+                        Send(CreatePacket().AddData("Result", "True").AddData("ServerToken", savedServerData.Token).AddData("RequestName", "DownloadToken"));
 
                         Token = savedServerData.Token;
 
@@ -681,7 +719,7 @@ namespace SecretRebootConsole
 
         public void PrepareForRemoval()
         {
-            Peer.Disconnect();          
+            
         }
     }
 }
