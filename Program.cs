@@ -2,17 +2,21 @@
 using System.Threading.Tasks;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Text;
 using System;
 
 using Nivera;
 using Nivera.IO;
 using Nivera.Utils;
 using Nivera.Logging;
-using Nivera.Networking;
+
+using LiteNetLib;
+using LiteNetLib.Utils;
 
 using Newtonsoft.Json;
 
-namespace Secret_Reboot_Server_Console
+namespace SecretRebootConsole
 {
     public enum ServerPunishmentSeverity
     {
@@ -191,9 +195,28 @@ namespace Secret_Reboot_Server_Console
     {
         public static Dictionary<int, NetworkPlayer> Players { get; } = new Dictionary<int, NetworkPlayer>();
 
-        public static NetworkServer Server { get; set; }
+        public static NetManager NetManager { get; set; }
+        public static EventBasedNetListener EventBasedNetListener { get; set; }
 
         public static string Ip { get; set; }
+
+        public static string CdnDirectory { get; set; }
+        public static string ConnectionKey { get; set; }
+        public static int[] EncryptionKey { get; set; }
+
+        public static string CreateConnectionKey()
+        {
+            byte[] buffer = new byte[] { };
+
+            Random random = new Random();
+
+            while (buffer.Length != 10)
+            {
+                random.NextBytes(buffer);
+            }
+
+            return Encoding.UTF32.GetString(buffer);
+        }
 
         public static async Task Main(string[] args)
         {
@@ -209,76 +232,148 @@ namespace Secret_Reboot_Server_Console
 
             NiveraLog.Info("Hello! Loading Secret Reboot ..");
 
+            CdnDirectory = args[0];
+
+            NiveraLog.Info($"CDN directory set to {CdnDirectory}");
+
             Database.Load();
 
             Ip = IpUtils.RetrieveCurrentIp();
 
-            Server = new NetworkServer();
+            NiveraLog.Info($"Building network components ..");
 
-            Server.OnConnectionEstablished += (x, e) =>
+            EventBasedNetListener = new EventBasedNetListener();
+            NetManager = new NetManager(EventBasedNetListener);
+
+            NiveraLog.Info($"Generating encryption key ..");
+
+            EncryptionKey = Nivera.Encryption.EncryptionKey.GenerateKey(512);
+
+            NiveraLog.Info($"Encryption key generated.");
+
+            NiveraLog.Info($"Generating connection key ..");
+
+            ConnectionKey = CreateConnectionKey();
+
+            File.WriteAllText($"{CdnDirectory}/connectionkey.txt", ConnectionKey);
+
+            NiveraLog.Info($"Connection key generated: {ConnectionKey}");
+
+            NiveraLog.Info("Finished building network");
+
+            NetManager.AllowPeerAddressChange = false;
+            NetManager.BroadcastReceiveEnabled = false;
+            NetManager.AutoRecycle = true;
+            NetManager.DisconnectOnUnreachable = true;
+            NetManager.DisconnectTimeout = 10000;
+            NetManager.EnableStatistics = true;
+            NetManager.IPv6Mode = IPv6Mode.Disabled;
+            NetManager.MaxConnectAttempts = 5;
+            NetManager.PingInterval = 200;
+            NetManager.ReconnectDelay = 1000;
+            NetManager.ReuseAddress = true;
+            NetManager.UnconnectedMessagesEnabled = false;
+            NetManager.Start();
+
+            NiveraLog.Info("Server Manager started, registering event listeners ..");
+
+            EventBasedNetListener.ConnectionRequestEvent += x =>
             {
-                Players[x.Id] = new NetworkPlayer(e);
+                NiveraLog.Verbose($"Received a connection request from {x.RemoteEndPoint.Address}");
 
-                NiveraLog.Info($"CLIENT {x.Id} CONNECTED FROM {x.EndPoint}");
+                x.AcceptIfKey(ConnectionKey);
             };
 
-            Server.OnConnectionTerminated += (x, e) =>
+            EventBasedNetListener.DeliveryEvent += (x, e) =>
             {
-                NiveraLog.Info($"CLIENT {x.Id} DISCONNECTED FROM {x.EndPoint}: {e.Reason} ({e.SocketErrorCode})");
+                NiveraLog.Warn($"DeliveryEvent: {e} FROM {x.EndPoint.Address}");
+            };
+
+            EventBasedNetListener.NetworkErrorEvent += (x, e) =>
+            {
+                NiveraLog.Error($"A socket error occured on endpoint {x.Address}: {e}");
+            };
+
+            EventBasedNetListener.NetworkLatencyUpdateEvent += (x, e) =>
+            {
+                Players[x.Id].Ping = e;
+
+                NiveraLog.Debug($"Updated latency of {x.EndPoint}: {e}");
+            };
+
+            EventBasedNetListener.NetworkReceiveEvent += (x, e, z, y) =>
+            {
+                if (y != DeliveryMethod.ReliableOrdered)
+                {
+                    NiveraLog.Warn($"Received a {y} packet from {x.EndPoint}");
+                    return;
+                }
+
+                if (!Players.TryGetValue(x.Id, out var player))
+                {
+                    NiveraLog.Warn($"Failed to find a corresponding network handler for {x.EndPoint}");
+                    return;
+                }
+
+                int[] key = JsonConvert.DeserializeObject<int[]>(e.GetString());
+
+                if (key == null || key != EncryptionKey)
+                {
+                    NiveraLog.Warn($"Client {x.EndPoint} sent a invalid encryption key.");
+                    return;
+                }
+
+                string json = Nivera.Encryption.Encryption.Decrypt(EncryptionKey, e.GetString());
+
+                Dictionary<string, string> packet = JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
+
+                if (packet["SenderType"] == "GameClient")
+                    player.ProcessClient(packet);
+                else if (packet["SenderType"] == "ServerClient")
+                    player.ProcessServer(packet);
+                else
+                    NiveraLog.Warn($"Received an invalid SenderType from {x.EndPoint}: {packet["SenderType"]}");
+            };
+
+            EventBasedNetListener.NetworkReceiveUnconnectedEvent += (x, e, z) =>
+            {
+                NiveraLog.Warn($"Recieved an unconnected message from {x}: {z}");
+            };
+
+            EventBasedNetListener.PeerConnectedEvent += x =>
+            {
+                NiveraLog.Info($"Peer connected, sending encryption key ..");
+
+                NetDataWriter netDataWriter = new NetDataWriter(true);
+
+                netDataWriter.Put(JsonConvert.SerializeObject(EncryptionKey));
+
+                x.Send(netDataWriter, DeliveryMethod.ReliableOrdered);
+
+                NiveraLog.Info($"Encryption key sent, creating network handler ..");
+
+                Players[x.Id] = new NetworkPlayer(x);
+
+                NiveraLog.Info("Network Handler created.");
+            };
+
+            EventBasedNetListener.PeerDisconnectedEvent += (x, e) =>
+            {
+                NiveraLog.Info($"Peer disconnected from {x.EndPoint}: {e.Reason}/{e.SocketErrorCode}");
+                NiveraLog.Info($"Destroying network handler ..");
+
+                if (Players[x.Id].IsServer && !string.IsNullOrEmpty(Players[x.Id].Token))
+                    ServerList.OnServerDisconnected(Players[x.Id].Token);
 
                 Players[x.Id].PrepareForRemoval();
                 Players.Remove(x.Id);
             };
-
-            Server.Start();
 
             NiveraLog.Info($"Server is listening on IP {Ip} and all ports (UDP)");
             NiveraLog.Info($"Finished loading.");
 
             await Task.Delay(-1);
         }
-    }
-
-    public class PacketBuilder
-    {
-        private NetworkPacket packet = new NetworkPacket();
-
-        public static PacketBuilder Default => new PacketBuilder().WithHeader("Sender", "Console").WithIp(Program.Ip);
-
-        public PacketBuilder WithHeader(string name, string header)
-        {
-            packet.Headers[name] = header;
-
-            return this;
-        }
-
-        public PacketBuilder WithIp(string ip)
-        {
-            packet.Headers["SenderAddress"] = ip;
-
-            return this;
-        }
-
-        public PacketBuilder WithArg(string name, string value)
-        {
-            packet.Args[name] = value;
-
-            return this;
-        }
-
-        public PacketBuilder WithContent(object content)
-        {
-            var contents = new List<string>(packet.Content);
-
-            contents.Add(content.ToString());
-
-            packet.Content = contents.ToArray();
-
-            return this;
-        }
-
-        public NetworkPacket Complete()
-            => packet;
     }
 
     public static class ServerList
@@ -305,82 +400,98 @@ namespace Secret_Reboot_Server_Console
             if (!savedServerData.IsVerified)
                 return;
 
-            if (savedServerData.ServerPunishmentHistory.History.Any(x => x.Severity == ServerPunishmentSeverity.PermanentServerListRemoval || x.Severity == ServerPunishmentSeverity.TemporaryServerListRemoval))
-                return;
-
             if (!VerifiedServers.ContainsKey(serverToken))
                 VerifiedServers[serverToken] = new ServerListServerData();
 
-            VerifiedServers[serverToken].IP = data["Address"];
-            VerifiedServers[serverToken].MaxPlayers = int.Parse(data["MaxPlayers"]);
-            VerifiedServers[serverToken].Name = data["Name"];
-            VerifiedServers[serverToken].Pastebin = data["Pastebin"];
-            VerifiedServers[serverToken].Players = int.Parse(data["Players"]);
-            VerifiedServers[serverToken].Port = int.Parse(data["Port"]);
+            VerifiedServers[serverToken].IP = data["ServerIp"];
+            VerifiedServers[serverToken].MaxPlayers = int.Parse(data["ServerMaxPlayers"]);
+            VerifiedServers[serverToken].Name = data["ServerName"];
+            VerifiedServers[serverToken].Pastebin = data["ServerPastebinId"];
+            VerifiedServers[serverToken].Players = int.Parse(data["ServerCurrentPlayers"]);
+            VerifiedServers[serverToken].Port = int.Parse(data["ServerPort"]);
+
+            File.WriteAllText($"{Program.CdnDirectory}/verifiedserverlist.json", JsonConvert.SerializeObject(VerifiedServers, Formatting.Indented));
+        }
+
+        public static void OnServerDisconnected(string serverToken)
+        {
+            VerifiedServers.Remove(serverToken);
+
+            File.WriteAllText($"{Program.CdnDirectory}/verifiedserverlist.json", JsonConvert.SerializeObject(VerifiedServers, Formatting.Indented));
+        }
+    }
+
+    public static class PacketExtensions
+    {
+        public static Dictionary<string, string> AddData(this Dictionary<string, string> packet, string key, object value)
+        {
+            packet.Add(key, value.ToString());
+
+            return packet;
         }
     }
 
     public class NetworkPlayer
     {
-        public NetworkConnection Connection { get; set; }
+        public NetPeer Peer { get; }
 
         public string IP { get; set; }
         public int Port { get; set; }
-        public bool IsServer { get; set; }     
+        public bool IsServer { get; set; }    
+        public int Ping { get; set; }
+        public string Token { get; set; }
 
-        public NetworkPlayer(NetworkConnection networkConnection)
+        public IPEndPoint EndPoint { get; set; }
+
+        public NetworkPlayer(NetPeer netPeer)
         {
-            Connection = networkConnection;
+            Peer = netPeer;
+            EndPoint = netPeer.EndPoint;
+        }
 
-            networkConnection.OnDataReceived += x =>
+        public Dictionary<string, string> CreatePacket()
+        {
+            return new Dictionary<string, string>()
             {
-                NiveraLog.Info($"CLIENT {Connection.netPeer.Id} FROM {x.Headers["SenderAddress"]} SENT {x.Headers["Sender"]} PACKET ({x.Content.Length}/{x.Headers.Values.Count})");
-
-                if (x.Headers["Sender"] == "Identity")
-                {
-                    IsServer = bool.Parse(x.Headers["ServerIdentity"]);
-                    Port = int.Parse(x.Headers["ServerPort"]);
-                    IP = x.Headers["SenderAddress"];
-
-                    return;
-                }
-
-                if (x.Headers["Sender"] == "ServerClient")
-                    ProcessServer(x);
-                else
-                    ProcessClient(x);
-
-                NiveraLog.Info($"CLIENT {Connection.netPeer.Id} PING: {Connection.latency} ms");
+                ["SenderType"] = "ConsoleClient",
+                ["SenderAddress"] = Program.Ip,
+                ["RequestType"] = "ConsoleRequest",
+                ["RequestName"] = "",
             };
         }
 
-        public void ProcessCommand(NetworkPacket networkPacket)
+        public void Send(Dictionary<string, string> packet)
         {
-            SavedPlayerData adminData = Database.Players.Find(x => x.HWID == networkPacket.Headers["PlayerHwId"]);
-
-            if (adminData == null)
+            if (Peer.ConnectionState != ConnectionState.Disconnected)
             {
-                Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "AuthCommand").WithArg("Result", "Failed").WithArg("FailReason", "UNAUTHORIZED_PLAYER").Complete());
+                NetDataWriter netDataWriter = new NetDataWriter(true);
 
-                return;
+                netDataWriter.Put(JsonConvert.SerializeObject(packet));
+
+                Peer.Send(netDataWriter, DeliveryMethod.ReliableOrdered);
             }
+        }
 
-            switch (networkPacket.Args["AuthCommandName"])
+        public void ProcessCommand(Dictionary<string, string> packet)
+        {
+            SavedPlayerData adminData = Database.Players.FirstOrDefault(x => x.HWID == packet["TargetHwIdToken"]);
+
+            switch (packet["AuthCommandName"])
             {
                 case "GlobalBanAdd":
                     {
                         if (!adminData.Token.Contains("gbAllowed"))
                         {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "AuthCommand").WithArg("Result", "Failed").WithArg("FailReason", "UNAUTHORIZED_PLAYER").Complete());
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unauthorized_Player"));
 
                             return;
                         }
 
-                        SavedPlayerData savedPlayerData = Database.Players.Find(x => x.HWID == networkPacket.Args["BannedHwId"]);
+                        SavedPlayerData savedPlayerData = Database.Players.FirstOrDefault(x => x.HWID == packet["BannedHwIdToken"]);
 
                         if (savedPlayerData == null)
                         {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "AuthCommand").WithArg("AuthCommandName", "GlobalBanAdd").WithArg("Result", "Failed").WithArg("FailReason", "UNKNOWN_PLAYER").Complete());
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Target_Player"));
 
                             break;
                         }
@@ -388,27 +499,25 @@ namespace Secret_Reboot_Server_Console
                         savedPlayerData.BanHistory.History.Add(new PlayerBan
                         {
                             ActiveFrom = DateTime.Now,
-                            ActiveUntil = DateTime.Parse(networkPacket.Args["BanActiveUntil"]),
+                            ActiveUntil = DateTime.Parse(packet["BanActiveUntil"]),
                             BanID = new Random().Next(10, 1000),
                             IsGlobal = true,
-                            IsPermanent = networkPacket.Args["IsPermanent"] == "True",
+                            IsPermanent = packet["IsPermanent"] == "True",
                             IssuerID = adminData.ID,
-                            Reason = networkPacket.Args["BanReason"]
+                            Reason = packet["BanReason"]
                         });
 
                         foreach (var server in ServerList.VerifiedServers)
                         {
-                            SavedServerData savedServerData = Database.Servers.Find(x => x.Token == server.Key);
+                            NetworkPlayer networkPlayer = Program.Players.FirstOrDefault(x => x.Value.IsServer && x.Value.Token == server.Key).Value;
 
-                            if (savedServerData == null)
-                                continue;
-
-                            var player = Program.Players.FirstOrDefault(x => x.Value.Connection.netPeer.EndPoint.Address.ToString().Split(':')[0] == savedServerData.IP).Value;
-
-                            player.Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "NewGlobalBan").WithArg("PlayerHwId", savedPlayerData.HWID).Complete());
+                            if (networkPlayer != null)
+                            {
+                                networkPlayer.Send(networkPlayer.CreatePacket().AddData("RequestName", "CheckGlobalBan").AddData("BannedHwIdToken", packet["BannedHwIdToken"]));
+                            }
                         }
 
-                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "AuthCommand").WithArg("AuthCommandName", "GlobalBanAdd").WithArg("Result", "Success").WithArg("GlobalBanId", savedPlayerData.BanHistory.History.Last().BanID.ToString()).Complete());
+                        Send(CreatePacket().AddData("Result", "True").AddData("GlobalBanId", savedPlayerData.BanHistory.History.Last().BanID));
 
                         Database.ValidatePunishments();
                         Database.Save();
@@ -418,105 +527,161 @@ namespace Secret_Reboot_Server_Console
             }
         }
 
-        public void ProcessServer(NetworkPacket networkPacket)
+        public string GenerateRandomIdentifier()
         {
-            switch (networkPacket.Headers["RequestType"])
+            byte[] buffer = new byte[] { };
+
+            Random random = new Random();
+
+            while (buffer.Length != 20)
             {
-                case "None":
+                random.NextBytes(buffer);
+            }
+
+            return Encoding.UTF32.GetString(buffer);
+        }
+
+        public string GenerateRandomToken()
+        {
+            byte[] buffer = new byte[] { };
+
+            Random random = new Random();
+
+            while (buffer.Length != 30)
+            {
+                random.NextBytes(buffer);
+            }
+
+            return Convert.ToBase64String(buffer);
+        }
+        
+        public void ProcessServer(Dictionary<string, string> packet)
+        {
+            switch (packet["RequestName"])
+            {
+                case "ServerInfo":
                     {
+                        IP = packet["ServerIp"];
+                        IsServer = bool.Parse(packet["ServerStatus"]);
+                        Port = int.Parse(packet["ServerPort"]);
+
+                        SavedServerData savedServerData = Database.Servers.FirstOrDefault(x => x.IP == IP && x.Port == Port && x.HWID == packet["HwIdToken"]);
+
+                        if (savedServerData == null)
+                        {
+                            savedServerData = new SavedServerData()
+                            {
+                                HWID = packet["HwIdToken"],
+                                ID = GenerateRandomIdentifier(),
+                                IP = IP,
+                                IsVerified = false,
+                                MaxPlayers = int.Parse(packet["ServerMaxPlayers"]),
+                                Name = packet["ServerName"],
+                                PlayersActive = int.Parse(packet["ServerCurrentPlayers"]),
+                                Port = Port,
+                                ServerPunishmentHistory = new ServerPunishmentHistory(),
+                                Token = GenerateRandomToken()
+                            };
+
+                            Database.Servers.Add(savedServerData);
+                            Database.Save();
+                        }
+
+                        Send(CreatePacket().AddData("ServerData", JsonConvert.SerializeObject(savedServerData)).AddData("RequestName", "ServerInfo"));
+
                         break;
                     }
 
                 case "PlayerInfo":
                     {
-                        SavedPlayerData savedPlayerData = Database.Players.Find(x => x.HWID == networkPacket.Args["PlayerHwId"]);
+                        SavedPlayerData savedPlayerData = Database.Players.FirstOrDefault(x => x.HWID == packet["TargetHwIdToken"]);
 
                         if (savedPlayerData == null)
                         {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "PlayerInfo").WithArg("Result", "Failed").WithArg("FailReason", "UNKNOWN_PLAYER").Complete());
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Player"));
 
                             return;
                         }
 
-                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "PlayerInfo").WithArg("Result", "Ok").WithArg("PlayerData", JsonConvert.SerializeObject(savedPlayerData)).Complete());
+                        Send(CreatePacket().AddData("Result", "True").AddData("PlayerData", JsonConvert.SerializeObject(savedPlayerData)).AddData("RequestName", "PlayerInfo"));
 
                         break;
                     }
 
                 case "AuthCommand":
                     {
-                        SavedPlayerData savedPlayerData = Database.Players.Find(x => x.HWID == networkPacket.Args["PlayerHwId"]);
+                        SavedPlayerData savedPlayerData = Database.Players.FirstOrDefault(x => x.HWID == packet["TargetHwIdToken"]);
 
                         if (savedPlayerData == null)
                         {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "AuthCommand").WithArg("Result", "Failed").WithArg("FailReason", "UNAUTHORIZED_PLAYER").Complete());
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unknown_Player"));
 
                             return;
                         }
 
-                        ProcessCommand(networkPacket);
+                        if (!savedPlayerData.Token.Contains("authCmds"))
+                        {
+                            Send(CreatePacket().AddData("Result", "False").AddData("Reason", "Unauthorized_Player"));
+
+                            return;
+                        }
+
+                        ProcessCommand(packet); ;
 
                         break;
                     }
 
                 case "DataUpdate":
                     {
-                        ServerList.UpdateDataOnList(networkPacket.Args["ServerToken"], networkPacket.Args);
+                        ServerList.UpdateDataOnList(packet["ServerToken"], packet);
 
                         break;
                     }
 
                 case "DownloadToken":
                     {
-                        SavedServerData savedServerData = Database.Servers.FirstOrDefault(x => x.IP == networkPacket.Args["ServerAddress"]);
+                        SavedServerData savedServerData = Database.Servers.FirstOrDefault(x => x.IP == IP && x.Port == Port && x.HWID == packet["HwIdToken"]);
 
-                        if (savedServerData == null || !savedServerData.IsVerified)
+                        if (savedServerData == null)
                         {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadToken").WithArg("Result", "Failed").WithArg("FailReason", "UNAUTHORIZED_SERVER").Complete());
+                            savedServerData = new SavedServerData()
+                            {
+                                HWID = packet["HwIdToken"],
+                                ID = GenerateRandomIdentifier(),
+                                IP = IP,
+                                IsVerified = false,
+                                MaxPlayers = int.Parse(packet["ServerMaxPlayers"]),
+                                Name = packet["ServerName"],
+                                PlayersActive = int.Parse(packet["ServerCurrentPlayers"]),
+                                Port = Port,
+                                ServerPunishmentHistory = new ServerPunishmentHistory(),
+                                Token = GenerateRandomToken()
+                            };
 
-                            return;
+                            Database.Servers.Add(savedServerData);
+                            Database.Save();
                         }
 
-                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadToken").WithArg("ServerToken", savedServerData.Token).Complete());
+                        Send(CreatePacket().AddData("Result", "True").AddData("ServerToken", savedServerData.Token));
+
+                        Token = savedServerData.Token;
 
                         break;
                     }
             }
         }
 
-        public void ProcessClient(NetworkPacket networkPacket)
+        public void ProcessClient(Dictionary<string, string> packet)
         {
-            switch (networkPacket.Headers["RequestType"])
+            switch (packet["RequestName"])
             {
-                case "DownloadServerList":
-                    {
-                        SavedPlayerData savedPlayerData = Database.Players.Find(x => x.HWID == networkPacket.Args["PlayerHwId"]);
 
-                        if (savedPlayerData == null)
-                        {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadServerList").WithArg("Result", "Failed").WithArg("FailReason", "UNAUTHORIZED_PLAYER").Complete());
-
-                            return;
-                        }
-
-                        if (savedPlayerData.BanHistory.IsPermanentActive)
-                        {
-                            Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadServerList").WithArg("Result", "Failed").WithArg("FailReason", "ACTIVE_BAN").Complete());
-
-                            return;
-                        }
-
-                        Connection.Send(PacketBuilder.Default.WithHeader("RequestType", "DownloadServerList").WithArg("Result", "Ok").WithArg("ServerListData", JsonConvert.SerializeObject(ServerList.VerifiedServers)).Complete());
-
-                        break;
-                    }
             }
         }
 
         public void PrepareForRemoval()
         {
-            Connection.Disconnect();
-            Connection = null;
+            Peer.Disconnect();          
         }
     }
 }
